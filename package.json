@@ -1,12 +1,13 @@
 {
   "name": "arewasave-bot",
   "version": "1.0.0",
-  "description": "ArewaSave Telegram bot",
+  "description": "ArewaSave Telegram Video and Audio Downloader",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "node-telegram-bot-api": "^0.66.0"
+    "node-telegram-bot-api": "^0.66.0",
+    "ytdl-core": "^4.11.5"
   }
 }
