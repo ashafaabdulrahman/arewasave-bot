@@ -12,6 +12,7 @@ if (!TOKEN) {
 }
 
 const bot = new TelegramBot(TOKEN, { polling: true });
+const pending = new Map();
 
 const allowedDomains = [
   "youtube.com",
@@ -47,13 +48,12 @@ bot.on("message", async (msg) => {
   }
 
   if (!isAllowedUrl(text)) {
-    return bot.sendMessage(
-      chatId,
-      "❌ Please send a valid link from YouTube, TikTok, Facebook or Instagram."
-    );
+    return bot.sendMessage(chatId, "❌ Send a valid supported video link.");
   }
 
-  bot.sendMessage(chatId, "Choose what you want to download:", {
+  pending.set(chatId, text);
+
+  return bot.sendMessage(chatId, "Choose download type:", {
     reply_markup: {
       inline_keyboard: [
         [
@@ -63,57 +63,76 @@ bot.on("message", async (msg) => {
       ]
     }
   });
+});
 
-  bot.once("callback_query", async (query) => {
-    if (query.message.chat.id !== chatId) return;
+bot.on("callback_query", async (query) => {
+  const chatId = query.message.chat.id;
+  const text = pending.get(chatId);
 
-    const mode = query.data;
-    const folder = fs.mkdtempSync(path.join(os.tmpdir(), "arewasave-"));
+  if (!text) {
+    return bot.answerCallbackQuery(query.id, {
+      text: "Please send the link again."
+    });
+  }
 
-    try {
-      await bot.answerCallbackQuery(query.id);
-      await bot.sendMessage(chatId, "⏳ Processing your link. Please wait...");
+  const mode = query.data;
 
-      const options = {
-        output: path.join(folder, "%(title)s.%(ext)s"),
-        noPlaylist: true
-      };
+  if (mode !== "video" && mode !== "audio") return;
 
-      if (mode === "audio") {
-        options.extractAudio = true;
-        options.audioFormat = "mp3";
-      } else {
-        options.format = "best[height<=720]";
-      }
+  pending.delete(chatId);
 
-      await youtubedl(text, options);
+  await bot.answerCallbackQuery(query.id);
 
-      const files = fs.readdirSync(folder);
-      const file = files.find(name => !name.endsWith(".part"));
+  const folder = fs.mkdtempSync(path.join(os.tmpdir(), "arewasave-"));
 
-      if (!file) {
-        throw new Error("Downloaded file not found");
-      }
+  try {
+    await bot.sendMessage(chatId, "⏳ Downloading, please wait...");
 
-      const filePath = path.join(folder, file);
+    const options = {
+      output: path.join(folder, "%(title)s.%(ext)s"),
+      noPlaylist: true
+    };
 
-      if (mode === "audio") {
-        await bot.sendAudio(chatId, filePath);
-      } else {
-        await bot.sendVideo(chatId, filePath);
-      }
-
-      await bot.sendMessage(chatId, "✅ Download completed!");
-    } catch (error) {
-      console.error(error);
-      await bot.sendMessage(
-        chatId,
-        "⚠️ Download failed. The link may be unavailable or unsupported."
-      );
-    } finally {
-      fs.rmSync(folder, { recursive: true, force: true });
+    if (mode === "audio") {
+      options.extractAudio = true;
+      options.audioFormat = "mp3";
+    } else {
+      options.format = "best[ext=mp4]/best";
+      options.mergeOutputFormat = "mp4";
     }
-  });
+
+    await youtubedl(text, options);
+
+    const files = fs.readdirSync(folder).filter(f => !f.endsWith(".part"));
+
+    if (!files.length) {
+      throw new Error("File not found");
+    }
+
+    const filePath = path.join(folder, files[0]);
+
+    if (mode === "audio") {
+      await bot.sendAudio(chatId, filePath);
+    } else {
+      try {
+        await bot.sendVideo(chatId, filePath);
+      } catch (videoError) {
+        console.log("sendVideo failed; trying document.");
+        await bot.sendDocument(chatId, filePath);
+      }
+    }
+
+    await bot.sendMessage(chatId, "✅ Download completed!");
+  } catch (error) {
+    console.error("Download error:", error.message);
+
+    await bot.sendMessage(
+      chatId,
+      "⚠️ Download failed. The video may be unavailable, unsupported, or too large."
+    );
+  } finally {
+    fs.rmSync(folder, { recursive: true, force: true });
+  }
 });
 
 console.log("ArewaSave is running!");
