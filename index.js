@@ -53,8 +53,10 @@ bot.onText(/\/start/, (msg) => {
   );
 });
 
-bot.onText(/\/stats/, (msg) => {
-  if (msg.from.id !== ADMIN_ID) {
+bot.onText(/^\/stats(?:@\w+)?$/, (msg) => {
+  console.log('Stats command received from:', msg.from.id);
+
+  if (String(msg.from.id) !== String(ADMIN_ID)) {
     return bot.sendMessage(msg.chat.id, '⛔ Access denied.');
   }
 
