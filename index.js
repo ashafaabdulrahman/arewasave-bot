@@ -1,138 +1,199 @@
-const TelegramBot = require("node-telegram-bot-api");
-const youtubedl = require("youtube-dl-exec");
-const fs = require("fs");
-const path = require("path");
-const os = require("os");
+const TelegramBot = require('node-telegram-bot-api');
+const youtubedl = require('youtube-dl-exec');
+const fs = require('fs');
+const path = require('path');
 
 const TOKEN = process.env.BOT_TOKEN;
-
-if (!TOKEN) {
-  console.error("BOT_TOKEN is missing!");
-  process.exit(1);
-}
+const ADMIN_ID = 6406642001;
 
 const bot = new TelegramBot(TOKEN, { polling: true });
-const pending = new Map();
 
-const allowedDomains = [
-  "youtube.com",
-  "youtu.be",
-  "tiktok.com",
-  "facebook.com",
-  "fb.watch",
-  "instagram.com"
-];
+const DATA_FILE = path.join(__dirname, 'stats.json');
 
-function isAllowedUrl(text) {
+let stats = {
+  users: [],
+  downloads: 0,
+  videos: 0,
+  audios: 0
+};
+
+if (fs.existsSync(DATA_FILE)) {
   try {
-    const url = new URL(text);
-    return allowedDomains.some(domain =>
-      url.hostname === domain || url.hostname.endsWith("." + domain)
-    );
-  } catch {
-    return false;
+    stats = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+  } catch (e) {
+    console.log('Stats file error');
   }
 }
 
-bot.on("message", async (msg) => {
-  const chatId = msg.chat.id;
-  const text = msg.text;
+function saveStats() {
+  fs.writeFileSync(DATA_FILE, JSON.stringify(stats, null, 2));
+}
 
-  if (!text) return;
+const pending = new Map();
 
-  if (text === "/start") {
-    return bot.sendMessage(
-      chatId,
-      "Welcome to ArewaSave! 📥\n\nSend me a public video link from YouTube, TikTok, Instagram or Facebook."
-    );
+function addUser(user) {
+  if (!stats.users.some(u => u.id === user.id)) {
+    stats.users.push({
+      id: user.id,
+      date: new Date().toISOString()
+    });
+    saveStats();
+  }
+}
+
+bot.onText(/\/start/, (msg) => {
+  addUser(msg.from);
+
+  bot.sendMessage(
+    msg.chat.id,
+    '👋 Welcome to ArewaSave!\n\n' +
+    '📥 Send me a video link from a supported platform.\n\n' +
+    'I will help you download Video or MP3.\n\n' +
+    '🚀 ArewaSave makes downloading easier!'
+  );
+});
+
+bot.onText(/\/stats/, (msg) => {
+  if (msg.from.id !== ADMIN_ID) {
+    return bot.sendMessage(msg.chat.id, '⛔ Access denied.');
   }
 
-  if (!isAllowedUrl(text)) {
-    return bot.sendMessage(chatId, "❌ Send a valid supported video link.");
+  const today = new Date().toISOString().slice(0, 10);
+
+  const usersToday = stats.users.filter(u =>
+    u.date.slice(0, 10) === today
+  ).length;
+
+  bot.sendMessage(
+    msg.chat.id,
+    '📊 AREWASAVE STATISTICS\n\n' +
+    '👥 Total Users: ' + stats.users.length + '\n' +
+    '📅 Users Today: ' + usersToday + '\n' +
+    '📥 Total Downloads: ' + stats.downloads + '\n' +
+    '🎬 Videos: ' + stats.videos + '\n' +
+    '🎵 Audios: ' + stats.audios
+  );
+});
+
+bot.on('message', async (msg) => {
+  if (!msg.text || msg.text.startsWith('/')) return;
+
+  addUser(msg.from);
+
+  const url = msg.text.trim();
+
+  if (!/^https?:\/\//i.test(url)) {
+    return bot.sendMessage(msg.chat.id, 'Please send a valid link.');
   }
 
-  pending.set(chatId, text);
+  if (!/(youtube\.com|youtu\.be|tiktok\.com|facebook\.com|instagram\.com)/i.test(url)) {
+    return bot.sendMessage(msg.chat.id, '❌ This platform is not supported.');
+  }
 
-  return bot.sendMessage(chatId, "Choose download type:", {
+  pending.set(msg.from.id, url);
+
+  bot.sendMessage(msg.chat.id, 'Choose your download format:', {
     reply_markup: {
       inline_keyboard: [
         [
-          { text: "🎬 Video", callback_data: "video" },
-          { text: "🎵 MP3", callback_data: "audio" }
+          { text: '🎬 Video', callback_data: 'video' },
+          { text: '🎵 MP3', callback_data: 'audio' }
         ]
       ]
     }
   });
 });
 
-bot.on("callback_query", async (query) => {
+bot.on('callback_query', async (query) => {
   const chatId = query.message.chat.id;
-  const text = pending.get(chatId);
+  const userId = query.from.id;
+  const url = pending.get(userId);
 
-  if (!text) {
+  if (!url) {
     return bot.answerCallbackQuery(query.id, {
-      text: "Please send the link again."
+      text: 'Please send the link again.'
     });
   }
 
   const mode = query.data;
 
-  if (mode !== "video" && mode !== "audio") return;
-
-  pending.delete(chatId);
+  if (mode !== 'video' && mode !== 'audio') {
+    return bot.answerCallbackQuery(query.id);
+  }
 
   await bot.answerCallbackQuery(query.id);
 
-  const folder = fs.mkdtempSync(path.join(os.tmpdir(), "arewasave-"));
+  pending.delete(userId);
+
+  const folder = path.join(__dirname, 'downloads');
+  fs.mkdirSync(folder, { recursive: true });
+
+  const filename = Date.now().toString();
+  const output = path.join(folder, filename);
+
+  const file = mode === 'audio'
+    ? output + '.mp3'
+    : output + '.mp4';
+
+  const options = mode === 'audio'
+    ? {
+        output: output + '.%(ext)s',
+        extractAudio: true,
+        audioFormat: 'mp3',
+        audioQuality: 0
+      }
+    : {
+        output: output + '.%(ext)s',
+        format: 'best[ext=mp4]/best',
+        mergeOutputFormat: 'mp4'
+      };
+
+  const status = await bot.sendMessage(chatId, '⏳ Downloading...');
 
   try {
-    await bot.sendMessage(chatId, "⏳ Downloading, please wait...");
+    await youtubedl(url, options);
 
-    const options = {
-      output: path.join(folder, "%(title)s.%(ext)s"),
-      noPlaylist: true
-    };
+    const actualFile = mode === 'audio'
+      ? fs.readdirSync(folder).find(f => f.startsWith(filename))
+      : fs.readdirSync(folder).find(f => f.startsWith(filename));
 
-    if (mode === "audio") {
-      options.extractAudio = true;
-      options.audioFormat = "mp3";
-    } else {
-      options.format = "best[ext=mp4]/best";
-      options.mergeOutputFormat = "mp4";
+    if (!actualFile) {
+      throw new Error('File not found');
     }
 
-    await youtubedl(text, options);
+    const filePath = path.join(folder, actualFile);
 
-    const files = fs.readdirSync(folder).filter(f => !f.endsWith(".part"));
-
-    if (!files.length) {
-      throw new Error("File not found");
-    }
-
-    const filePath = path.join(folder, files[0]);
-
-    if (mode === "audio") {
+    if (mode === 'audio') {
       await bot.sendAudio(chatId, filePath);
+      stats.audios++;
     } else {
       try {
         await bot.sendVideo(chatId, filePath);
-      } catch (videoError) {
-        console.log("sendVideo failed; trying document.");
+      } catch (e) {
         await bot.sendDocument(chatId, filePath);
       }
+      stats.videos++;
     }
 
-    await bot.sendMessage(chatId, "✅ Download completed!");
-  } catch (error) {
-    console.error("Download error:", error.message);
+    stats.downloads++;
+    saveStats();
 
-    await bot.sendMessage(
+    await bot.deleteMessage(chatId, status.message_id);
+
+    fs.unlinkSync(filePath);
+
+  } catch (error) {
+    console.log(error);
+
+    bot.sendMessage(
       chatId,
-      "⚠️ Download failed. The video may be unavailable, unsupported, or too large."
+      '❌ Download failed. Please try another link.'
     );
-  } finally {
-    fs.rmSync(folder, { recursive: true, force: true });
+
+    try {
+      bot.deleteMessage(chatId, status.message_id);
+    } catch (e) {}
   }
 });
 
-console.log("ArewaSave is running!");
+console.log('ArewaSave is running!');
